@@ -18,6 +18,10 @@ type FoldersProps = {
     folderId: string
   ) => Promise<{ ok: boolean; error?: string }>;
   onEnsureSavedStations: (folderId: string, force?: boolean) => Promise<unknown>;
+  onRenameFolder: (
+    folderId: string,
+    name: string
+  ) => Promise<{ ok: boolean; error?: string; folder?: FolderSummary }>;
   onRemoveStation: (
     folderId: string,
     stationId: string
@@ -33,17 +37,23 @@ export default function Folders({
   onCreateFolder,
   onDeleteFolder,
   onEnsureSavedStations,
+  onRenameFolder,
   onRemoveStation,
 }: FoldersProps) {
   const [name, setName] = useState('');
   const [fieldError, setFieldError] = useState('');
   const [selectedFolderId, setSelectedFolderId] = useState('');
+  const [renameName, setRenameName] = useState('');
+  const [renameError, setRenameError] = useState('');
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [savedStationsError, setSavedStationsError] = useState('');
   const [removingStationId, setRemovingStationId] = useState<string | null>(null);
   const savedStations = selectedFolderId ? getSavedStations(selectedFolderId) : [];
   const loadingSavedStations = selectedFolderId
     ? loadingSavedFolderId(selectedFolderId)
     : false;
+  const selectedFolder =
+    folders.find((folder) => folder.id === selectedFolderId) ?? null;
 
   const createFolder = async () => {
     const trimmedName = name.trim();
@@ -86,6 +96,43 @@ export default function Folders({
     }
   };
 
+  const renameFolder = async () => {
+    const trimmedName = renameName.trim();
+
+    if (!selectedFolderId) {
+      setRenameError('Select a folder to rename.');
+      return;
+    }
+
+    if (!trimmedName) {
+      setRenameError('Folder name is required.');
+      return;
+    }
+
+    if (selectedFolder?.name === trimmedName) {
+      setRenameError('Choose a new folder name.');
+      return;
+    }
+
+    try {
+      setRenamingFolderId(selectedFolderId);
+      setRenameError('');
+      const result = await onRenameFolder(selectedFolderId, trimmedName);
+
+      if (!result.ok) {
+        setRenameError(result.error || 'Could not rename that folder right now.');
+        return;
+      }
+
+      setRenameName(trimmedName);
+      onAlert(`Folder renamed to "${trimmedName}".`, 'success');
+    } catch {
+      setRenameError('Could not rename that folder right now.');
+    } finally {
+      setRenamingFolderId(null);
+    }
+  };
+
   const removeSavedStation = async (stationId: string) => {
     if (!selectedFolderId || removingStationId === stationId) {
       return;
@@ -118,6 +165,11 @@ export default function Folders({
       return folders[0]?.id ?? '';
     });
   }, [folders]);
+
+  useEffect(() => {
+    setRenameName(selectedFolder?.name ?? '');
+    setRenameError('');
+  }, [selectedFolder?.id, selectedFolder?.name]);
 
   useEffect(() => {
     if (!selectedFolderId) {
@@ -237,11 +289,41 @@ export default function Folders({
               <div>
                 <p className="eyebrow">Saved stations</p>
                 <h2>
-                  {folders.find((folder) => folder.id === selectedFolderId)?.name ||
-                    'Select a folder'}
+                  {selectedFolder?.name || 'Select a folder'}
                 </h2>
               </div>
             </div>
+
+            {selectedFolder && (
+              <div className="folder-create">
+                <TextField
+                  error={Boolean(renameError)}
+                  helperText={renameError || ' '}
+                  label="Rename folder"
+                  onChange={(event) => {
+                    setRenameName(event.target.value);
+                    if (renameError) {
+                      setRenameError('');
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      void renameFolder();
+                    }
+                  }}
+                  placeholder="Update this folder name"
+                  value={renameName}
+                />
+                <button
+                  className="ghost-button"
+                  disabled={!selectedFolderId || renamingFolderId === selectedFolderId}
+                  onClick={() => void renameFolder()}
+                  type="button"
+                >
+                  {renamingFolderId === selectedFolderId ? 'Renaming...' : 'Rename'}
+                </button>
+              </div>
+            )}
 
             {loadingSavedStations && (
               <p className="support-copy">Loading saved stations...</p>

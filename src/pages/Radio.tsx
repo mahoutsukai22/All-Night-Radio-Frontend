@@ -202,6 +202,7 @@ export default function Radio({
   const [selectedFolder, setSelectedFolder] = useState('');
   const [selectedCountry, setSelectedCountry] = useState('');
   const [savingId, setSavingId] = useState<string | null>(null);
+  const [pendingSaveStation, setPendingSaveStation] = useState<RadioStation | null>(null);
   const [activeStationId, setActiveStationId] = useState('');
   const [nowPlayingStation, setNowPlayingStation] = useState<RadioStation | null>(
     null
@@ -257,7 +258,7 @@ export default function Radio({
     filtered[0] ??
     null;
   const contextStation = selectedCountry ? selectedCountryStation : playerStation;
-  const stationToSave = playerStation ?? activeStation;
+  const stationToSave = pendingSaveStation ?? playerStation ?? activeStation;
   const savedStations = selectedFolder ? getSavedStations(selectedFolder) : [];
   const loadingSaved = selectedFolder ? loadingSavedFolderId(selectedFolder) : false;
   const countryMapStations = useMemo(
@@ -404,15 +405,17 @@ export default function Radio({
     }
   }, []);
 
-  const saveStation = useCallback(
-    async (station: RadioStation) => {
+  const confirmSaveStation = useCallback(
+    async (station: RadioStation, folderIdOverride?: string) => {
+      const targetFolderId = folderIdOverride ?? selectedFolder;
+
       if (!token) {
         setNotice('Sign in to save stations into folders.');
         onRequireAuth('signup');
         return;
       }
 
-      if (!selectedFolder) {
+      if (!targetFolderId) {
         setNotice('Create a folder first, then save stations into it.');
         setOpenPanel('favorites');
         return;
@@ -425,7 +428,7 @@ export default function Radio({
       setSavingId(station.stationuuid);
 
       try {
-        const result = await onSaveStation(selectedFolder, {
+        const result = await onSaveStation(targetFolderId, {
           name: station.name,
           streamUrl: station.url_resolved || station.url,
           country: station.country || null,
@@ -438,12 +441,55 @@ export default function Radio({
         }
 
         setNotice(`Saved ${station.name} to your folder.`);
+        setPendingSaveStation(null);
+        setOpenPanel(null);
       } finally {
         setSavingId(null);
       }
     },
     [onRequireAuth, onSaveStation, savingId, selectedFolder, token]
   );
+
+  const promptSaveStation = useCallback(
+    (station: RadioStation) => {
+      if (!token) {
+        setNotice('Sign in to save stations into folders.');
+        onRequireAuth('signup');
+        return;
+      }
+
+      if (folders.length === 0) {
+        setNotice('No folders created yet. Create one first to save stations.');
+        setPendingSaveStation(station);
+        setOpenPanel('favorites');
+        return;
+      }
+
+      if (folders.length === 1) {
+        setSelectedFolder(folders[0].id);
+        void confirmSaveStation(station, folders[0].id);
+        return;
+      }
+
+      setSelectedFolder((current) => {
+        if (current && folders.some((folder) => folder.id === current)) {
+          return current;
+        }
+
+        return folders[0]?.id ?? '';
+      });
+      setPendingSaveStation(station);
+      setNotice('');
+      setOpenPanel('favorites');
+    },
+    [confirmSaveStation, folders, onRequireAuth, token]
+  );
+
+  const handleOpenLibrary = useCallback(() => {
+    setOpenPanel(null);
+    setPendingSaveStation(null);
+    onOpenFolders();
+  }, [onOpenFolders]);
 
   const handleClearSelection = useCallback(() => {
     setSelectedCountry('');
@@ -664,7 +710,7 @@ export default function Radio({
             <button
               className="icon-pill ghost-button"
               disabled={!stationToSave || savingId === stationToSave?.stationuuid}
-              onClick={() => stationToSave && void saveStation(stationToSave)}
+              onClick={() => stationToSave && promptSaveStation(stationToSave)}
               type="button"
             >
               {token ? 'Favorite' : 'Sign in'}
@@ -699,7 +745,13 @@ export default function Radio({
         </div>
 
         {openPanel && (
-          <Modal onClose={() => setOpenPanel(null)} open={Boolean(openPanel)}>
+          <Modal
+            onClose={() => {
+              setOpenPanel(null);
+              setPendingSaveStation(null);
+            }}
+            open={Boolean(openPanel)}
+          >
             <Fade in={Boolean(openPanel)}>
               <Box aria-modal="true" className="stage-modal" role="dialog">
                 <div className="stage-modal-header">
@@ -709,7 +761,10 @@ export default function Radio({
                   </div>
                   <button
                     className="ghost-button"
-                    onClick={() => setOpenPanel(null)}
+                    onClick={() => {
+                      setOpenPanel(null);
+                      setPendingSaveStation(null);
+                    }}
                     type="button"
                   >
                     Close
@@ -808,37 +863,62 @@ export default function Radio({
 
                     {token && (
                       <>
+                        {stationToSave && (
+                          <p className="support-copy">
+                            Choose a folder for <strong>{stationToSave.name}</strong>.
+                          </p>
+                        )}
+
                         <div className="favorites-toolbar">
-                          <select
-                            className="folder-select"
-                            onChange={(event) => setSelectedFolder(event.target.value)}
-                            value={selectedFolder}
-                          >
-                            <option value="">Choose a folder</option>
-                            {folders.map((folder) => (
-                              <option key={folder.id} value={folder.id}>
-                                {folder.name}
-                              </option>
-                            ))}
-                          </select>
+                          {folders.length > 0 ? (
+                            <select
+                              className="folder-select"
+                              onChange={(event) => setSelectedFolder(event.target.value)}
+                              value={selectedFolder}
+                            >
+                              <option value="">Choose a folder</option>
+                              {folders.map((folder) => (
+                                <option key={folder.id} value={folder.id}>
+                                  {folder.name}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <div className="modal-empty-state">
+                              No folders created yet. Create your first folder to save this
+                              station.
+                            </div>
+                          )}
 
                           <div className="inline-actions">
-                            <button
-                              className="primary-button"
-                              disabled={!stationToSave || savingId === stationToSave?.stationuuid}
-                              onClick={() => stationToSave && void saveStation(stationToSave)}
-                              type="button"
-                            >
-                              {savingId === stationToSave?.stationuuid
-                                ? 'Saving...'
-                                : 'Save This Station'}
-                            </button>
+                            {folders.length > 0 && (
+                              <button
+                                className="primary-button"
+                                disabled={
+                                  !selectedFolder ||
+                                  !stationToSave ||
+                                  savingId === stationToSave?.stationuuid
+                                }
+                                onClick={() =>
+                                  stationToSave && void confirmSaveStation(stationToSave)
+                                }
+                                type="button"
+                              >
+                                {savingId === stationToSave?.stationuuid
+                                  ? 'Saving...'
+                                  : stationToSave
+                                    ? `Save ${stationToSave.name}`
+                                    : 'Save This Station'}
+                              </button>
+                            )}
                             <button
                               className="ghost-button"
-                              onClick={onOpenFolders}
+                              onClick={handleOpenLibrary}
                               type="button"
                             >
-                              Open library
+                              {folders.length === 0
+                                ? 'Create your own folder'
+                                : 'Open library'}
                             </button>
                           </div>
                         </div>
@@ -847,13 +927,13 @@ export default function Radio({
                           <p className="support-copy">Tuning up your saved stations...</p>
                         )}
 
-                        {!loadingSaved && savedStations.length === 0 && (
+                        {!loadingSaved && folders.length > 0 && savedStations.length === 0 && (
                           <div className="modal-empty-state">
                             This folder is ready for its first signal.
                           </div>
                         )}
 
-                        {!loadingSaved && savedStations.length > 0 && (
+                        {!loadingSaved && folders.length > 0 && savedStations.length > 0 && (
                           <div className="modal-station-list">
                             {savedStations.map((item) => (
                               <button
@@ -951,7 +1031,7 @@ export default function Radio({
                             </button>
                             <button
                               className="ghost-button"
-                              onClick={() => void saveStation(station)}
+                              onClick={() => promptSaveStation(station)}
                               type="button"
                             >
                               {token ? 'Save' : 'Sign in'}

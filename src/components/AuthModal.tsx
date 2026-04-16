@@ -55,6 +55,8 @@ export default function AuthModal({
     return null;
   }
 
+  const emailRedirectTo = window.location.origin;
+
   const getAuthErrorMessage = (error: any, currentMode: AuthMode) => {
     if (error?.status === 429) {
       return currentMode === 'signup'
@@ -120,6 +122,9 @@ export default function AuthModal({
       const { data, error: signUpError } = await supabase.auth.signUp({
         email: trimmedEmail,
         password: trimmedPassword,
+        options: {
+          emailRedirectTo,
+        },
       });
 
       if (signUpError) {
@@ -137,7 +142,7 @@ export default function AuthModal({
       }
 
       setMessage(
-        'Account created. Check your email to confirm, then sign in to save stations.'
+        'Account created. Check your email to confirm, and you will be redirected back here.'
       );
       setMode('login');
       setPassword('');

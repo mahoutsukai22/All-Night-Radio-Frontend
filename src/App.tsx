@@ -224,6 +224,50 @@ function App() {
     }
   };
 
+  const renameFolder = async (folderId: string, name: string) => {
+    if (!token) {
+      return { ok: false as const, error: 'Sign in to rename folders.' };
+    }
+
+    const trimmedName = name.trim();
+
+    if (!trimmedName) {
+      return { ok: false as const, error: 'Folder name is required.' };
+    }
+
+    const previousFolders = folders;
+
+    setFolders((current) =>
+      current.map((folder) =>
+        folder.id === folderId ? { ...folder, name: trimmedName } : folder
+      )
+    );
+
+    try {
+      const updated = await apiFetch(`/folders/${folderId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: trimmedName }),
+      });
+
+      const nextFolder = normalizeFolder(updated);
+
+      setFolders((current) =>
+        current.map((folder) => (folder.id === folderId ? nextFolder : folder))
+      );
+
+      return { ok: true as const, folder: nextFolder };
+    } catch (err: any) {
+      setFolders(previousFolders);
+      return {
+        ok: false as const,
+        error: err.message || 'Could not rename that folder right now.',
+      };
+    }
+  };
+
   const deleteFolder = async (folderId: string) => {
     const previousFolders = folders;
     const previousStations = folderStationsById[folderId];
@@ -467,6 +511,7 @@ function App() {
               onCreateFolder={createFolder}
               onDeleteFolder={deleteFolder}
               onEnsureSavedStations={loadFolderStations}
+              onRenameFolder={renameFolder}
               onRemoveStation={removeStationFromFolder}
             />
           )}
