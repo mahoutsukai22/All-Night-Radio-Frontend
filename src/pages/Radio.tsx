@@ -1,8 +1,10 @@
 import {
-  type ChangeEvent,
   startTransition,
+  type ChangeEvent,
+  useCallback,
   useDeferredValue,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -11,9 +13,14 @@ import type { FolderSummary, SavedStation, SaveStationInput } from '../App';
 import type { AuthMode } from '../components/AuthModal';
 import WorldMap from '../components/WorldMap';
 import {
+  GLOBAL_STATION_INCREMENT,
+  GLOBAL_STATION_REFRESH_MS,
+  INITIAL_GLOBAL_STATION_LIMIT,
   MAP_STATION_LIMIT,
+  MAX_GLOBAL_STATION_LIMIT,
+  getCountryStations,
+  getGlobalStations,
   getMapStations,
-  getStations,
   type RadioStation,
 } from '../lib/radio';
 
@@ -33,7 +40,8 @@ type RadioProps = {
   token: string | null;
 };
 
-const MAX_DEFAULT_BROWSE_RESULTS = 180;
+const MAX_BROWSE_PAGE_SIZE = 40;
+const MAX_EXPLORE_PAGE_SIZE = 40;
 const MAX_MAP_MARKERS = 96;
 const MAX_MARKERS_PER_COUNTRY = 2;
 const MAX_SELECTED_COUNTRY_MARKERS = 10;
@@ -42,6 +50,79 @@ const stationHasCoordinates = (station: RadioStation) =>
   typeof station.geo_lat === 'number' && typeof station.geo_long === 'number';
 
 const normalize = (value?: string | null) => value?.trim().toLowerCase() ?? '';
+
+const sanitizeStations = (stations: RadioStation[]) =>
+  stations.filter((station) => station.url && station.name);
+
+const haveSameStationOrder = (
+  current: RadioStation[],
+  next: RadioStation[]
+) =>
+  current.length === next.length &&
+  current.every((station, index) => station.stationuuid === next[index]?.stationuuid);
+
+const filterStationsByContext = (
+  stations: RadioStation[],
+  selectedCountry: string,
+  searchTerm: string
+) => {
+  const query = searchTerm.trim().toLowerCase();
+
+  return stations.filter((station) => {
+    const matchesCountry = selectedCountry
+      ? station.country?.toLowerCase().includes(selectedCountry.toLowerCase()) ?? false
+      : true;
+
+    const matchesQuery = query
+      ? [
+          station.name,
+          station.country,
+          station.state,
+          station.subcountry,
+          station.tags,
+          station.language,
+        ]
+          .filter(Boolean)
+          .some((value) => value!.toLowerCase().includes(query))
+      : true;
+
+    return matchesCountry && matchesQuery;
+  });
+};
+
+const filterStationsByCountry = (
+  stations: RadioStation[],
+  selectedCountry: string
+) => {
+  const countryKey = normalize(selectedCountry);
+
+  if (!countryKey) {
+    return [];
+  }
+
+  return stations.filter((station) =>
+    normalize(station.country).includes(countryKey)
+  );
+};
+
+const mergeUniqueStations = (
+  primary: RadioStation[],
+  secondary: RadioStation[]
+) => {
+  const seen = new Set<string>();
+  const merged: RadioStation[] = [];
+
+  for (const station of [...primary, ...secondary]) {
+    if (!station.stationuuid || seen.has(station.stationuuid)) {
+      continue;
+    }
+
+    seen.add(station.stationuuid);
+    merged.push(station);
+  }
+
+  return merged;
+};
 
 const buildMapStationSample = (
   stations: RadioStation[],
@@ -65,10 +146,9 @@ const buildMapStationSample = (
   const selectedCountryKey = normalize(selectedCountry);
 
   if (selectedCountryKey && byCountry.has(selectedCountryKey)) {
-    for (const station of byCountry.get(selectedCountryKey)!.slice(
-      0,
-      MAX_SELECTED_COUNTRY_MARKERS
-    )) {
+    for (const station of byCountry
+      .get(selectedCountryKey)!
+      .slice(0, MAX_SELECTED_COUNTRY_MARKERS)) {
       chosen.set(station.stationuuid, station);
     }
   }
@@ -116,106 +196,191 @@ export default function Radio({
   onRequireAuth,
   token,
 }: RadioProps) {
-  const [stations, setStations] = useState<RadioStation[]>([]);
+  const [globalStations, setGlobalStations] = useState<RadioStation[]>([]);
+  const [countryStations, setCountryStations] = useState<RadioStation[]>([]);
   const [mapStations, setMapStations] = useState<RadioStation[]>([]);
-  const [filtered, setFiltered] = useState<RadioStation[]>([]);
   const [selectedFolder, setSelectedFolder] = useState('');
   const [selectedCountry, setSelectedCountry] = useState('');
   const [savingId, setSavingId] = useState<string | null>(null);
   const [activeStationId, setActiveStationId] = useState('');
-  const [nowPlayingStation, setNowPlayingStation] = useState<RadioStation | null>(null);
+  const [nowPlayingStation, setNowPlayingStation] = useState<RadioStation | null>(
+    null
+  );
   const [searchTerm, setSearchTerm] = useState('');
   const [loadingStations, setLoadingStations] = useState(true);
+  const [loadingCountryStations, setLoadingCountryStations] = useState(false);
   const [notice, setNotice] = useState('');
   const [openPanel, setOpenPanel] = useState<PanelType>(null);
+  const [exploreVisibleCount, setExploreVisibleCount] = useState(
+    MAX_EXPLORE_PAGE_SIZE
+  );
+  const [browseVisibleCount, setBrowseVisibleCount] = useState(
+    MAX_BROWSE_PAGE_SIZE
+  );
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const countryCacheRef = useRef<Record<string, RadioStation[]>>({});
+  const globalStationLimitRef = useRef(INITIAL_GLOBAL_STATION_LIMIT);
   const deferredSearchTerm = useDeferredValue(searchTerm);
+  const trimmedSearchTerm = deferredSearchTerm.trim();
+  const selectedCountryKey = normalize(selectedCountry);
 
+  const fallbackCountryStations = useMemo(
+    () => filterStationsByCountry(globalStations, selectedCountry),
+    [globalStations, selectedCountry]
+  );
+  const visibleCountryStations = useMemo(
+    () =>
+      selectedCountryKey
+        ? countryStations.length > 0
+          ? countryStations
+          : fallbackCountryStations
+        : [],
+    [countryStations, fallbackCountryStations, selectedCountryKey]
+  );
+  const stations = useMemo(
+    () => (selectedCountryKey ? visibleCountryStations : globalStations),
+    [globalStations, selectedCountryKey, visibleCountryStations]
+  );
+  const filtered = useMemo(
+    () => filterStationsByContext(stations, selectedCountry, deferredSearchTerm),
+    [deferredSearchTerm, selectedCountry, stations]
+  );
   const activeStation =
     filtered.find((station) => station.stationuuid === activeStationId) ??
     stations.find((station) => station.stationuuid === activeStationId) ??
     filtered[0] ??
     stations[0] ??
     null;
-  const displayStation = nowPlayingStation ?? activeStation;
-  const stationToSave = displayStation ?? activeStation;
+  const playerStation = nowPlayingStation ?? activeStation;
+  const selectedCountryStation =
+    filtered.find((station) => station.stationuuid === activeStationId) ??
+    filtered[0] ??
+    null;
+  const contextStation = selectedCountry ? selectedCountryStation : playerStation;
+  const stationToSave = playerStation ?? activeStation;
   const savedStations = selectedFolder ? getSavedStations(selectedFolder) : [];
   const loadingSaved = selectedFolder ? loadingSavedFolderId(selectedFolder) : false;
-
-  const trimmedSearchTerm = deferredSearchTerm.trim();
-  const browseStations =
-    trimmedSearchTerm || selectedCountry
-      ? filtered
-      : filtered.slice(0, MAX_DEFAULT_BROWSE_RESULTS);
-  const visibleMapStations = buildMapStationSample(
-    mapStations,
-    selectedCountry,
-    activeStation?.stationuuid
+  const countryMapStations = useMemo(
+    () =>
+      selectedCountryKey
+        ? visibleCountryStations.filter(stationHasCoordinates)
+        : [],
+    [selectedCountryKey, visibleCountryStations]
   );
+  const visibleMapStations = useMemo(
+    () =>
+      buildMapStationSample(
+        mergeUniqueStations(countryMapStations, mapStations),
+        selectedCountry,
+        activeStationId
+      ),
+    [activeStationId, countryMapStations, mapStations, selectedCountry]
+  );
+  const browseSourceStations = useMemo(
+    () => filtered,
+    [filtered]
+  );
+  const browseStations = browseSourceStations.slice(0, browseVisibleCount);
+  const exploreSourceStations = useMemo(
+    () =>
+      stations
+        .filter((station) => {
+          if (selectedCountry) {
+            return normalize(station.country).includes(normalize(selectedCountry));
+          }
+
+          if (contextStation?.state) {
+            return (
+              normalize(station.state) === normalize(contextStation.state) ||
+              normalize(station.subcountry) === normalize(contextStation.state)
+            );
+          }
+
+          if (contextStation?.country) {
+            return normalize(station.country).includes(
+              normalize(contextStation.country)
+            );
+          }
+
+          return true;
+        })
+        .filter((station) => station.url && station.name),
+    [contextStation?.country, contextStation?.state, selectedCountry, stations]
+  );
+  const exploreStations = exploreSourceStations.slice(0, exploreVisibleCount);
   const areaName =
-    displayStation?.state?.trim() ||
-    displayStation?.subcountry?.trim() ||
+    contextStation?.state?.trim() ||
+    contextStation?.subcountry?.trim() ||
     selectedCountry ||
-    displayStation?.country?.trim() ||
+    contextStation?.country?.trim() ||
     'Global';
   const areaCountry =
-    selectedCountry || displayStation?.country?.trim() || 'Worldwide';
+    selectedCountry || contextStation?.country?.trim() || 'Worldwide';
+  const canLoadMoreExplore = exploreStations.length < exploreSourceStations.length;
+  const canLoadMoreBrowse = browseStations.length < browseSourceStations.length;
 
-  const exploreStations = stations
-    .filter((station) => {
-      if (displayStation?.state) {
-        return (
-          normalize(station.state) === normalize(displayStation.state) ||
-          normalize(station.subcountry) === normalize(displayStation.state)
-        );
-      }
-
-      if (selectedCountry) {
-        return normalize(station.country).includes(normalize(selectedCountry));
-      }
-
-      if (displayStation?.country) {
-        return normalize(station.country).includes(normalize(displayStation.country));
-      }
-
-      return true;
-    })
-    .filter((station) => station.url && station.name)
-    .slice(0, 18);
-
-  const loadStations = async () => {
+  const loadMapStations = useCallback(async () => {
     try {
-      setLoadingStations(true);
-      const [stationData, mapData] = await Promise.all([
-        getStations(),
-        getMapStations(),
-      ]);
-      const valid = stationData.filter((station) => station.url && station.name);
-      const validMapStations = mapData
-        .filter(
-          (station) =>
-            station.url && station.name && stationHasCoordinates(station)
-        )
+      const mapData = await getMapStations();
+      const validMapStations = sanitizeStations(mapData)
+        .filter(stationHasCoordinates)
         .slice(0, MAP_STATION_LIMIT);
 
-      setStations(valid);
-      setMapStations(
-        validMapStations.length > 0
-          ? validMapStations
-          : valid.filter(stationHasCoordinates).slice(0, MAP_STATION_LIMIT)
-      );
-      setFiltered(valid);
-      setActiveStationId((current) => current || valid[0]?.stationuuid || '');
+      setMapStations(validMapStations);
     } catch (err) {
-      console.error('Failed to load stations', err);
-      setNotice('Could not load live stations right now.');
+      console.error('Failed to load map stations', err);
       setMapStations([]);
-    } finally {
-      setLoadingStations(false);
     }
-  };
+  }, []);
 
-  const playStation = async (station: RadioStation) => {
+  const loadGlobalStations = useCallback(
+    async (
+      requestedLimit = INITIAL_GLOBAL_STATION_LIMIT,
+      { background = false }: { background?: boolean } = {}
+    ) => {
+      const nextLimit = Math.min(MAX_GLOBAL_STATION_LIMIT, requestedLimit);
+
+      if (!background) {
+        setLoadingStations(true);
+      }
+
+      try {
+        const stationData = await getGlobalStations(nextLimit);
+        const validStations = sanitizeStations(stationData);
+
+        globalStationLimitRef.current = Math.max(
+          globalStationLimitRef.current,
+          nextLimit
+        );
+
+        startTransition(() => {
+          setGlobalStations((current) =>
+            haveSameStationOrder(current, validStations) ? current : validStations
+          );
+          setMapStations((current) =>
+            current.length > 0
+              ? current
+              : validStations
+                  .filter(stationHasCoordinates)
+                  .slice(0, MAP_STATION_LIMIT)
+          );
+          setActiveStationId((current) => current || validStations[0]?.stationuuid || '');
+        });
+      } catch (err) {
+        console.error('Failed to load stations', err);
+        if (!background) {
+          setNotice('Could not load live stations right now.');
+        }
+      } finally {
+        if (!background) {
+          setLoadingStations(false);
+        }
+      }
+    },
+    []
+  );
+
+  const playStation = useCallback(async (station: RadioStation) => {
     const streamUrl = station.url_resolved || station.url;
 
     if (!streamUrl) {
@@ -237,51 +402,168 @@ export default function Radio({
         setNotice('Playback failed for this stream.');
       }
     }
-  };
+  }, []);
 
-  const saveStation = async (station: RadioStation) => {
-    if (!token) {
-      setNotice('Sign in to save stations into folders.');
-      onRequireAuth('signup');
-      return;
-    }
-
-    if (!selectedFolder) {
-      setNotice('Create a folder first, then save stations into it.');
-      setOpenPanel('favorites');
-      return;
-    }
-
-    if (!station?.url || !station?.name || savingId === station.stationuuid) {
-      return;
-    }
-
-    setSavingId(station.stationuuid);
-
-    try {
-      const result = await onSaveStation(selectedFolder, {
-        name: station.name,
-        streamUrl: station.url_resolved || station.url,
-        country: station.country || null,
-        favicon: station.favicon || null,
-      });
-
-      if (!result.ok) {
-        setNotice(result.error || 'Failed to save station.');
-
+  const saveStation = useCallback(
+    async (station: RadioStation) => {
+      if (!token) {
+        setNotice('Sign in to save stations into folders.');
+        onRequireAuth('signup');
         return;
       }
 
-      setNotice(`Saved ${station.name} to your folder.`);
-      setOpenPanel('favorites');
-    } finally {
-      setSavingId(null);
-    }
-  };
+      if (!selectedFolder) {
+        setNotice('Create a folder first, then save stations into it.');
+        setOpenPanel('favorites');
+        return;
+      }
+
+      if (!station?.url || !station?.name || savingId === station.stationuuid) {
+        return;
+      }
+
+      setSavingId(station.stationuuid);
+
+      try {
+        const result = await onSaveStation(selectedFolder, {
+          name: station.name,
+          streamUrl: station.url_resolved || station.url,
+          country: station.country || null,
+          favicon: station.favicon || null,
+        });
+
+        if (!result.ok) {
+          setNotice(result.error || 'Failed to save station.');
+          return;
+        }
+
+        setNotice(`Saved ${station.name} to your folder.`);
+      } finally {
+        setSavingId(null);
+      }
+    },
+    [onRequireAuth, onSaveStation, savingId, selectedFolder, token]
+  );
+
+  const handleClearSelection = useCallback(() => {
+    setSelectedCountry('');
+    setOpenPanel(null);
+  }, []);
+
+  const handleCountryClick = useCallback((country: string) => {
+    setSelectedCountry((current) => (current === country ? '' : country));
+    setOpenPanel('explore');
+  }, []);
+
+  const handleStationSelect = useCallback(
+    (station: RadioStation) => {
+      setActiveStationId(station.stationuuid);
+      void playStation(station);
+    },
+    [playStation]
+  );
 
   useEffect(() => {
-    void loadStations();
-  }, []);
+    void loadMapStations();
+    void loadGlobalStations();
+  }, [loadGlobalStations, loadMapStations]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timeoutId: number | null = null;
+
+    const scheduleNextExpansion = () => {
+      if (cancelled || globalStationLimitRef.current >= MAX_GLOBAL_STATION_LIMIT) {
+        return;
+      }
+
+      timeoutId = window.setTimeout(async () => {
+        if (cancelled) {
+          return;
+        }
+
+        if (document.visibilityState !== 'visible') {
+          scheduleNextExpansion();
+          return;
+        }
+
+        const nextLimit = Math.min(
+          MAX_GLOBAL_STATION_LIMIT,
+          globalStationLimitRef.current + GLOBAL_STATION_INCREMENT
+        );
+
+        await loadGlobalStations(nextLimit, { background: true });
+
+        if (!cancelled) {
+          scheduleNextExpansion();
+        }
+      }, GLOBAL_STATION_REFRESH_MS);
+    };
+
+    scheduleNextExpansion();
+
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [loadGlobalStations]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!selectedCountryKey) {
+      setCountryStations([]);
+      setLoadingCountryStations(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const cachedStations = countryCacheRef.current[selectedCountryKey];
+
+    if (cachedStations) {
+      setCountryStations(cachedStations);
+      setLoadingCountryStations(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setCountryStations([]);
+    setLoadingCountryStations(true);
+
+    void getCountryStations(selectedCountry)
+      .then((stationData) => {
+        if (cancelled) {
+          return;
+        }
+
+        const validStations = sanitizeStations(stationData);
+        countryCacheRef.current[selectedCountryKey] = validStations;
+        setCountryStations(validStations);
+      })
+      .catch((err) => {
+        if (cancelled) {
+          return;
+        }
+
+        console.error('Failed to load country stations', err);
+        setNotice(
+          `Could not fully load stations for ${selectedCountry}. Showing available results instead.`
+        );
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingCountryStations(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCountry, selectedCountryKey]);
 
   useEffect(() => {
     if (!token) {
@@ -296,7 +578,7 @@ export default function Radio({
     }
 
     void onEnsureSavedStations(selectedFolder);
-  }, [selectedFolder, token]);
+  }, [onEnsureSavedStations, selectedFolder, token]);
 
   useEffect(() => {
     setSelectedFolder((current) => {
@@ -309,51 +591,29 @@ export default function Radio({
   }, [folders]);
 
   useEffect(() => {
-    startTransition(() => {
-      const query = deferredSearchTerm.trim().toLowerCase();
+    setExploreVisibleCount(MAX_EXPLORE_PAGE_SIZE);
+  }, [openPanel, selectedCountry, contextStation?.country, contextStation?.state]);
 
-      const nextFiltered = stations.filter((station) => {
-        const matchesCountry = selectedCountry
-          ? station.country
-              ?.toLowerCase()
-              .includes(selectedCountry.toLowerCase()) ?? false
-          : true;
+  useEffect(() => {
+    setBrowseVisibleCount(MAX_BROWSE_PAGE_SIZE);
+  }, [openPanel, selectedCountry, trimmedSearchTerm]);
 
-        const matchesQuery = query
-          ? [
-              station.name,
-              station.country,
-              station.state,
-              station.subcountry,
-              station.tags,
-              station.language,
-            ]
-              .filter(Boolean)
-              .some((value) => value!.toLowerCase().includes(query))
-          : true;
+  useEffect(() => {
+    setActiveStationId((current) => {
+      if (filtered.some((station) => station.stationuuid === current)) {
+        return current;
+      }
 
-        return matchesCountry && matchesQuery;
-      });
-
-      setFiltered(nextFiltered);
-      setActiveStationId((current) => {
-        if (nextFiltered.some((station) => station.stationuuid === current)) {
-          return current;
-        }
-
-        return nextFiltered[0]?.stationuuid ?? '';
-      });
+      return filtered[0]?.stationuuid ?? stations[0]?.stationuuid ?? '';
     });
-  }, [deferredSearchTerm, selectedCountry, stations]);
+  }, [filtered, stations]);
 
   const modalTitle =
-    // Old modal labels: "Stations in ...", "Favorites", "Browse Stations"
     openPanel === 'explore'
       ? `${areaName} on the dial`
       : openPanel === 'favorites'
         ? 'Saved Signals'
         : 'Tune Finder';
-  // Old eyebrow labels: "Area explorer", "Save and revisit", "Manual browsing"
   const modalEyebrow =
     openPanel === 'explore'
       ? 'Local frequencies'
@@ -385,12 +645,11 @@ export default function Radio({
 
         <div className="now-playing-float">
           <p className="eyebrow">On air now</p>
-          <h3>{displayStation?.name || 'Pick a station'}</h3>
+          <h3>{playerStation?.name || 'Pick a station'}</h3>
           <p className="station-meta">
-            {[displayStation?.state, displayStation?.country]
+            {[playerStation?.state, playerStation?.country]
               .filter(Boolean)
-              .join(', ') ||
-              'Spin the globe and lock onto a signal'}
+              .join(', ') || 'Spin the globe and lock onto a signal'}
           </p>
 
           <div className="floating-player-actions">
@@ -442,7 +701,7 @@ export default function Radio({
         {openPanel && (
           <Modal onClose={() => setOpenPanel(null)} open={Boolean(openPanel)}>
             <Fade in={Boolean(openPanel)}>
-              <Box className="stage-modal" role="dialog" aria-modal="true">
+              <Box aria-modal="true" className="stage-modal" role="dialog">
                 <div className="stage-modal-header">
                   <div>
                     <p className="eyebrow">{modalEyebrow}</p>
@@ -463,6 +722,12 @@ export default function Radio({
                       Tune through stations around {areaName}. If local area data is
                       missing, this list falls back to the wider country signal.
                     </p>
+
+                    {loadingCountryStations && selectedCountry && (
+                      <p className="support-copy">
+                        Loading more stations from {selectedCountry}...
+                      </p>
+                    )}
 
                     <div className="modal-station-list">
                       {exploreStations.map((station) => (
@@ -489,9 +754,25 @@ export default function Radio({
                         </button>
                       ))}
 
-                      {exploreStations.length === 0 && (
+                      {!loadingStations && exploreStations.length === 0 && (
                         <div className="modal-empty-state">
                           No stations are coming through this area yet.
+                        </div>
+                      )}
+
+                      {canLoadMoreExplore && (
+                        <div className="inline-actions">
+                          <button
+                            className="ghost-button"
+                            onClick={() =>
+                              setExploreVisibleCount(
+                                (current) => current + MAX_EXPLORE_PAGE_SIZE
+                              )
+                            }
+                            type="button"
+                          >
+                            Load more stations
+                          </button>
                         </div>
                       )}
                     </div>
@@ -503,7 +784,8 @@ export default function Radio({
                     {!token && (
                       <div className="modal-auth-cta">
                         <p>
-                          Sign in to save the station on air and build your own late-night library.
+                          Sign in to save the station on air and build your own late-night
+                          library.
                         </p>
                         <div className="inline-actions">
                           <button
@@ -632,8 +914,14 @@ export default function Radio({
                         ? `${filtered.length} stations on the dial`
                         : selectedCountry
                           ? `${filtered.length} stations from ${selectedCountry}`
-                          : `Showing ${visibleMapStations.length} featured dots on the globe. Search a city, country, or station name to browse the full station list.`}
+                          : `Showing ${visibleMapStations.length} featured dots on the globe. Search a city, country, or station name to browse the station list in smaller batches.`}
                     </p>
+
+                    {loadingCountryStations && selectedCountry && (
+                      <p className="support-copy">
+                        Loading more stations from {selectedCountry}...
+                      </p>
+                    )}
 
                     <div className="modal-station-list">
                       {browseStations.map((station) => (
@@ -672,6 +960,22 @@ export default function Radio({
                         </div>
                       ))}
 
+                      {canLoadMoreBrowse && (
+                        <div className="inline-actions">
+                          <button
+                            className="ghost-button"
+                            onClick={() =>
+                              setBrowseVisibleCount(
+                                (current) => current + MAX_BROWSE_PAGE_SIZE
+                              )
+                            }
+                            type="button"
+                          >
+                            Load more stations
+                          </button>
+                        </div>
+                      )}
+
                       {!loadingStations && browseStations.length === 0 && (
                         <div className="modal-empty-state">
                           No stations are coming through for that search yet.
@@ -689,14 +993,9 @@ export default function Radio({
 
         <WorldMap
           activeStationId={activeStation?.stationuuid}
-          onCountryClick={(country) => {
-            setSelectedCountry((current) => (current === country ? '' : country));
-            setOpenPanel('explore');
-          }}
-          onStationSelect={(station) => {
-            setActiveStationId(station.stationuuid);
-            void playStation(station);
-          }}
+          onClearSelection={handleClearSelection}
+          onCountryClick={handleCountryClick}
+          onStationSelect={handleStationSelect}
           selectedCountry={selectedCountry}
           stations={visibleMapStations}
         />

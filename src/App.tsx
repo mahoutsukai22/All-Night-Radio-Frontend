@@ -89,63 +89,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const shouldBlockZoomShortcut = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) {
-        return false;
-      }
-
-      return (
-        event.key === '+' ||
-        event.key === '-' ||
-        event.key === '=' ||
-        event.key === '0' ||
-        event.code === 'Equal' ||
-        event.code === 'Minus' ||
-        event.code === 'Digit0' ||
-        event.code === 'NumpadAdd' ||
-        event.code === 'NumpadSubtract' ||
-        event.code === 'Numpad0'
-      );
-    };
-
-    const handleWheel = (event: WheelEvent) => {
-      if (event.ctrlKey || event.metaKey) {
-        event.preventDefault();
-      }
-    };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (shouldBlockZoomShortcut(event)) {
-        event.preventDefault();
-      }
-    };
-
-    const handleGesture = (event: Event) => {
-      event.preventDefault();
-    };
-
-    document.addEventListener('wheel', handleWheel, { passive: false });
-    document.addEventListener('keydown', handleKeyDown);
-    document.addEventListener('gesturestart', handleGesture as EventListener);
-    document.addEventListener('gesturechange', handleGesture as EventListener);
-    document.addEventListener('gestureend', handleGesture as EventListener);
-
-    return () => {
-      document.removeEventListener('wheel', handleWheel);
-      document.removeEventListener('keydown', handleKeyDown);
-      document.removeEventListener(
-        'gesturestart',
-        handleGesture as EventListener
-      );
-      document.removeEventListener(
-        'gesturechange',
-        handleGesture as EventListener
-      );
-      document.removeEventListener('gestureend', handleGesture as EventListener);
-    };
-  }, []);
-
-  useEffect(() => {
     if (!alert) {
       return;
     }
