@@ -1,73 +1,39 @@
-# React + TypeScript + Vite
+# Radio Sekai — frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Spin a globe and tune into live radio worldwide. React 18 + Vite, stations from
+[radio-browser.info](https://www.radio-browser.info), accounts via Supabase.
 
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cp .env.example .env   # fill in API + Supabase values
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Layout
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
 ```
+src/
+  App.tsx              shell: top bar, pages, toasts, dialogs, app context
+  context.ts           AppContext + useApp()
+  styles.css           season theme tokens + all styles
+  lib/                 radio-browser client, backend api(), lazy Supabase, themes
+  hooks/               usePlayer, useSession, useLibrary
+  components/          Globe (canvas), Ambience (seasonal particles), PlayerBar,
+                       StationList, dialogs, ThemePicker, Icon
+  pages/               Explore (globe + side panel), Library (folders, lazy-loaded)
+```
+
+## Performance notes
+
+- The globe is drawn on one `<canvas>` with d3-geo. Dragging, zooming and inertia
+  update a ref and redraw in `requestAnimationFrame`; React never re-renders per frame.
+- Country shapes, topojson and Supabase are separate chunks loaded after first paint.
+- Stations load in two pages (250 fast, then 750) because the directory API doesn't gzip.
+- No `backdrop-filter`/CSS `filter` on surfaces over the animated globe; lists render in pages of 40.
+- Seasonal particles are pre-rendered sprites on one canvas and respect `prefers-reduced-motion`
+  (and the ✨ toggle).
+
+## Themes
+
+春 Spring · 夏 Summer · 秋 Autumn · 冬 Winter, or **Auto** (follows the calendar).
+Each theme is a block of CSS custom properties in `styles.css`; the globe reads the same tokens.

@@ -1,13 +1,13 @@
-import { createClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
-export const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL!,
-  import.meta.env.VITE_SUPABASE_ANON_KEY!,
-  {
-    auth: {
-      autoRefreshToken: true,
-      detectSessionInUrl: true,
-      persistSession: true,
-    },
-  }
-);
+let client: Promise<SupabaseClient> | undefined;
+
+/** Supabase is loaded on demand so it never blocks the first paint. */
+export const getSupabase = () =>
+  (client ??= import('@supabase/supabase-js').then(({ createClient }) =>
+    createClient(
+      import.meta.env.VITE_SUPABASE_URL,
+      import.meta.env.VITE_SUPABASE_ANON_KEY,
+      { auth: { autoRefreshToken: true, detectSessionInUrl: true, persistSession: true } },
+    ),
+  ));
